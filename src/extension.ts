@@ -1,172 +1,250 @@
-// import { pathToFileURL } from 'node:url';
-// import { setFlagsFromString } from 'node:v8';
-import * as path from 'path';
-import * as vscode from 'vscode';
-import * as ipc from 'node-ipc';
+import * as vscode from 'vscode'
+import * as ipc from 'node-ipc'
 
-ipc.config.id = 'client';
-ipc.config.retry = 1000;
+export function activate(context: vscode.ExtensionContext): void {
+  console.log('"Furby" extension is now active!')
+  let enabled = true
+  let connected = false
 
-ipc.connectTo('furby', () => {
-  ipc.of.furby.on('connect', () => {
-    ipc.log('## VS Code Connected to furby ##', {config: ipc.config});
+  // A map of open files with a boolean indicating whether or not they have been activated
+  const opened: {[path: string]: boolean} = {}
+
+  // A map of open files and current selections
+  const selections: {[path: string]: vscode.Selection} = {}
+
+  ipc.config.id = 'vscode-furby'
+  ipc.config.retry = 1000
+  ipc.connectTo('furby', () => {
+    ipc.of.furby.on('connect', () => {
+      ipc.log('## Connected to furby ##', {config: ipc.config})
+      connected = true
+    })
+
+    ipc.of.furby.on('disconnect', () => {
+      ipc.log('Disconnected from furby')
+      connected = false
+    })
+
+    // ipc.of.furby.on('app.message', (data: any) => {
+    //   ipc.log('Got a message from furby: ', data);
+    // });
+    //
+    // console.log(ipc.of.furby.destroy);
+  })
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const notify = (message: any) => {
+    if (!connected) {
+      return
+    }
     ipc.of.furby.emit('app.message', {
       id: ipc.config.id,
-      message: {
-        type: 'open',
-        path: 'file:///dev/vs-code-extension'
-      }
-    });
-  });
+      message: message,
+    })
+  }
 
-  ipc.of.furby.on('disconnect', () => {
-    ipc.log('Disconnected from furby');
-  });
+  const updateStatusForUri = (uri: vscode.Uri) => {
+    if (!enabled) return
+    if (!uri) return
+    if (uri.scheme !== 'file') return
+    if (!vscode.window) return
 
-  ipc.of.furby.on('app.message', (data: any) => {
-    ipc.log('Got a message from furby: ', data);
-  });
+    const activeTextEditor: vscode.TextEditor | undefined = vscode.window.activeTextEditor
+    if (!activeTextEditor || !activeTextEditor.document.uri.fsPath) return
 
-  console.log(ipc.of.furby.destroy);
-});
-
-export function activate(context: vscode.ExtensionContext) {
-  console.log('"Furby" extension is now active!');
-
-  let furbyEnabled: boolean = true;
-
-  const updateStatusForUri = ( uriToDecorate : vscode.Uri ) => {
-    if (!uriToDecorate) {return;}
-
-    // Only process "file://" URIs.
-    if(uriToDecorate.scheme !== "file" ) {return;}
-
-    if(!vscode.window ) {return;}
-
-    const activeTextEditor : vscode.TextEditor | undefined = vscode.window.activeTextEditor;
-    if( !activeTextEditor )
-    {
-        return;
-    }
-
-    if ( !activeTextEditor.document.uri.fsPath )
-    {
-        return;
-    }
-
-    let numErrors = 0;
-    let numWarnings = 0;
-
-    if (furbyEnabled) {
-      let diagnostic: vscode.Diagnostic;
-      for (diagnostic of vscode.languages.getDiagnostics(uriToDecorate)) {
-          switch (diagnostic.severity) {
-              case 0:
-                  numErrors += 1;
-                  break;
-
-              case 1:
-                  numWarnings += 1;
-                  break;
-
-              // Ignore other severities for now
-          }
+    let numErrors = 0
+    let numWarnings = 0
+    let diagnostic: vscode.Diagnostic
+    for (diagnostic of vscode.languages.getDiagnostics(uri)) {
+      switch (diagnostic.severity) {
+        case 0:
+          numErrors += 1
+          break
+        case 1:
+          numWarnings += 1
+          break
       }
     }
 
-    console.log({numErrors, numWarnings});
-  };
+    // For now we are only reporting error severity in the count
+    notify({
+      type: 'linter',
+      count: numErrors,
+      errors: numErrors,
+      warnings: numWarnings,
+    })
+  }
 
+  const disposableEnable = vscode.commands.registerCommand('Furby.enable', () => {
+    enabled = true
 
-  let disposableEnable = vscode.commands.registerCommand('Furby.enable', () => {
-    furbyEnabled = true;
-
-    const activeTextEditor: vscode.TextEditor | undefined = vscode.window.activeTextEditor;
+    const activeTextEditor: vscode.TextEditor | undefined = vscode.window.activeTextEditor
     if (activeTextEditor) {
-        updateStatusForUri(activeTextEditor.document.uri);
+      updateStatusForUri(activeTextEditor.document.uri)
     }
-  });
+  })
 
-  let disposableDisable = vscode.commands.registerCommand('Furby.disable', () => {
-      furbyEnabled = false;
+  const disposableDisable = vscode.commands.registerCommand('Furby.disable', () => {
+    enabled = false
 
-      const activeTextEditor: vscode.TextEditor | undefined = vscode.window.activeTextEditor;
-      if (activeTextEditor) {
-          updateStatusForUri(activeTextEditor.document.uri);
+    const activeTextEditor: vscode.TextEditor | undefined = vscode.window.activeTextEditor
+    if (activeTextEditor) {
+      updateStatusForUri(activeTextEditor.document.uri)
+    }
+  })
+
+  const disposableHello = vscode.commands.registerCommand('Furby.hello', () => {
+    vscode.window.showInformationMessage('Hello World from furby!')
+  })
+
+  context.subscriptions.push(disposableEnable)
+  context.subscriptions.push(disposableDisable)
+  context.subscriptions.push(disposableHello)
+
+  vscode.workspace.onDidOpenTextDocument(
+    (textDocument) => {
+      const uri = textDocument.uri
+      if (!uri) return
+      if (uri.scheme !== 'file') return
+
+      // We don't fire a notify event here for open because VSCode fires this event
+      // for documents that are never actually activated (such as tsconfig.json)
+      // Instead, we record that the document was opened but has not yet been activated
+      opened[uri.fsPath] = false
+    },
+    null,
+    context.subscriptions,
+  )
+
+  vscode.workspace.onDidCloseTextDocument(
+    (textDocument) => {
+      const uri = textDocument.uri
+      if (!uri) return
+      if (uri.scheme !== 'file') return
+
+      delete opened[uri.fsPath]
+      delete selections[uri.fsPath]
+      notify({
+        type: 'close',
+        path: uri.fsPath,
+      })
+    },
+    null,
+    context.subscriptions,
+  )
+
+  vscode.window.onDidChangeTextEditorSelection(
+    (event) => {
+      const uri = event.textEditor?.document.uri
+      if (!uri) return
+      if (uri.scheme !== 'file') return
+
+      // Only worry about selections in the active editor
+      if (vscode.window.activeTextEditor !== event.textEditor) return
+
+      // Ignore multi-cursor/multi-selection scenarios
+      if (event.selections.length !== 1) return
+      const sel = event.selections[0]
+
+      // Ignore scenarios where there is selected text, report single cursor only
+      if (sel.start.line !== sel.end.line || sel.start.character !== sel.end.character) {
+        return
       }
-  });
 
-  let disposableHello = vscode.commands.registerCommand('Furby.hello', () => {
-    // Display a message box to the user
-    vscode.window.showInformationMessage('Hello World from furby!');
-  });
+      if (!selections[uri.fsPath]) {
+        selections[uri.fsPath] = sel
+      }
 
-  context.subscriptions.push(disposableEnable);
-  context.subscriptions.push(disposableDisable);
-  context.subscriptions.push(disposableHello);
+      notify({
+        type: 'cursor',
+        previous: {
+          line: selections[uri.fsPath].start.line,
+          character: selections[uri.fsPath].start.character,
+        },
+        current: {
+          line: sel.start.line,
+          character: sel.start.character,
+        },
+      })
 
-  vscode.workspace.onDidOpenTextDocument(textDocument => {
-    console.log(`onDidOpenTextDocument ${file(textDocument.uri.fsPath)}`);
+      selections[uri.fsPath] = sel
+    },
+    null,
+    context.subscriptions,
+  )
 
-    updateStatusForUri( textDocument.uri );
-  }, null, context.subscriptions );
+  vscode.window.onDidChangeActiveTextEditor(
+    (textEditor) => {
+      const uri = textEditor?.document?.uri
+      if (!uri) return
+      if (uri.scheme !== 'file') return
 
-  vscode.workspace.onDidCloseTextDocument(textDocument => {
-    console.log(`onDidCloseTextDocument ${file(textDocument.uri.fsPath)}`);
+      // Check if this is the first time this document is activated
+      if (!opened[uri.fsPath]) {
+        opened[uri.fsPath] = true
+        notify({
+          type: 'open',
+          path: uri.fsPath,
+        })
+      }
 
-    updateStatusForUri( textDocument.uri );
-  }, null, context.subscriptions );
+      notify({
+        type: 'active',
+        path: uri.fsPath,
+      })
 
-  vscode.window.onDidChangeTextEditorSelection(event => {
-		// Ignore multi-cursor/multi-selection scenarios
-		if (event.selections.length !== 1) {return;};
-		const sel = event.selections[0];
+      updateStatusForUri(uri)
+    },
+    null,
+    context.subscriptions,
+  )
 
-		// Ignore scenarios where there is selected text
-		if (sel.start.line !== sel.end.line || sel.start.character !== sel.end.character) { return; }
+  // This is called whenever the linting status is changed
+  vscode.languages.onDidChangeDiagnostics(
+    (diagnosticChangeEvent) => {
+      if (!vscode.window.activeTextEditor) return
 
-		console.log({line: sel.start.line, char: sel.start.character});
-	}, null, context.subscriptions );
+      const uri = vscode.window.activeTextEditor.document?.uri
+      if (!uri) return
+      if (uri.scheme !== 'file') return
 
-  vscode.workspace.onDidChangeTextDocument(event => {
-    console.log(`onDidChangeTextDocument ${file(event.document.uri.fsPath)}`);
+      // Only update status if the diagnostics of the active text editor changed
+      for (const diagnosticUri of diagnosticChangeEvent.uris) {
+        if (diagnosticUri.fsPath === uri.fsPath) {
+          updateStatusForUri(uri)
+          break
+        }
+      }
+    },
+    null,
+    context.subscriptions,
+  )
 
-    updateStatusForUri( event.document.uri );
-  }, null, context.subscriptions );
+  vscode.workspace.onDidChangeTextDocument(
+    (event) => {
+      const uri = event.document?.uri
+      if (!uri) return
+      if (uri.scheme !== 'file') return
 
-  vscode.window.onDidChangeActiveTextEditor(textEditor => {
-    if (textEditor === undefined) {
-      return;
-    }
-    console.log(`onDidChangeActiveTextEditor ${file(textEditor.document.uri.fsPath)}`);
+      // Notify all of the changes
+      for (let i = 0; i < event.contentChanges.length; i++) {
+        const changeEvent: vscode.TextDocumentContentChangeEvent = event.contentChanges[i]
+        const line = changeEvent.range.start.line
+        const lineText = event.document.lineAt(line).text
+        notify({
+          type: 'change',
+          change: changeEvent.text,
+          line: lineText,
+        })
+      }
 
-		updateStatusForUri(textEditor.document.uri );
-  }, null, context.subscriptions);
-
-  vscode.languages.onDidChangeDiagnostics(diagnosticChangeEvent => {
-    if (!vscode.window) { return; }
-
-    const activeTextEditor : vscode.TextEditor | undefined = vscode.window.activeTextEditor;
-    if (!activeTextEditor) { return; }
-
-    // Only monitor the active text editor
-    for (const uri of diagnosticChangeEvent.uris)
-    {
-       if (uri.fsPath === activeTextEditor.document.uri.fsPath)
-       {
-  				console.log(`onDidChangeDiagnostics ${file(uri.fsPath)}`);
-
-           updateStatusForUri( uri );
-           break;
-       }
-    }
-  }, null, context.subscriptions );
-
+      updateStatusForUri(uri)
+    },
+    null,
+    context.subscriptions,
+  )
 }
 
-const file = (uri: string) => {
-	return path.basename(uri);
-};
-
-// this method is called when your extension is deactivated
-export function deactivate() {}
+export function deactivate(): void {
+  // Do nothing
+}
